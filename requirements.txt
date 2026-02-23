@@ -5,3 +5,4 @@ networkx
 pyvis
 fpdf
 pillow
+plotly
