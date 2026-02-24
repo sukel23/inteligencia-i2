@@ -101,12 +101,12 @@ if st.session_state.role == "admin":
                 del db[u_del]
                 guardar_usuarios(db); st.success(f"ID {u_del} purgado."); st.rerun()
 
-# --- 4. SISTEMA DE PERSISTENCIA (GUARDAR/CARGAR) ---
+# --- 4. SISTEMA DE PERSISTENCIA ---
 def save_project(name):
     data = {
         "df": st.session_state.get('main_df'),
         "bitacora": st.session_state.get('bitacora', {}),
-        "fotos": st.session_state.get('fotos_sujetos', {})
+        "fotos": st.session_state.get('fotos_sujetos', {}) # Ahora guarda bytes
     }
     with open(os.path.join(CASOS_DIR, f"{name}.i2"), "wb") as f:
         pickle.dump(data, f)
@@ -160,6 +160,8 @@ if 'main_df' in st.session_state:
 
     # Resumen Estadístico
     st.subheader("📊 Resumen de Actividad Total")
+    col_stats1, col_stats2 = st.columns([2, 1])
+    
     salientes = df['Linea_A'].value_counts().reset_index()
     salientes.columns = ['Línea', 'Salientes']
     entrantes = df['Linea_B'].value_counts().reset_index()
@@ -167,7 +169,16 @@ if 'main_df' in st.session_state:
     stats = pd.merge(salientes, entrantes, on='Línea', how='outer').fillna(0)
     stats['Total'] = stats['Salientes'] + stats['Entrantes']
     stats = stats.sort_values(by='Total', ascending=False).reset_index(drop=True)
-    st.dataframe(stats, use_container_width=True)
+    
+    with col_stats1:
+        st.dataframe(stats, use_container_width=True)
+    
+    with col_stats2:
+        # Mini Histograma Temporal
+        df['Hora'] = df['Fecha'].dt.hour
+        fig_hora = px.histogram(df, x='Hora', nbins=24, title="Picos de Actividad (24h)", color_discrete_sequence=['#ff4b4b'])
+        fig_hora.update_layout(template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
+        st.plotly_chart(fig_hora, use_container_width=True)
 
     tab_red, tab_cruces, tab_forense, tab_fichas = st.tabs([
         "🕸️ Red de Vínculos", 
@@ -179,58 +190,22 @@ if 'main_df' in st.session_state:
     with tab_red:
         st.subheader("Mapa Jerárquico Horizontal (L-R)")
         df_inter = df.groupby(['Linea_A', 'Linea_B']).size().reset_index(name='cantidad')
-        
-        # Red Pyvis con fondo oscuro
         net = Network(height="700px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
-        
-        # Asignación de niveles: El Top 1 es nivel 0 (izquierda extrema)
         niveles = {row['Línea']: i for i, row in stats.iterrows()}
 
         for index, row in stats.iterrows():
             nodo = row['Línea']
-            # Color: Rojo para objetivos críticos, azul para el resto
             color_nodo = "#ff4b4b" if index < 3 else "#1f77b4"
             icono = " 👤" if nodo in st.session_state.fotos_sujetos else ""
-            
-            net.add_node(
-                nodo, 
-                label=f"{nodo}{icono}", 
-                size=int(min(row['Total'] + 20, 75)), 
-                level=niveles[nodo], 
-                color=color_nodo,
-                shape="dot"
-            )
+            net.add_node(nodo, label=f"{nodo}{icono}", size=int(min(row['Total'] + 20, 75)), 
+                         level=niveles[nodo], color=color_nodo, shape="dot")
 
         for _, fila in df_inter.iterrows():
             cant = int(fila['cantidad'])
-            net.add_edge(
-                fila['Linea_A'], 
-                fila['Linea_B'], 
-                label=str(cant), 
-                width=max(1, cant/2), 
-                color="#444444"
-            )
+            net.add_edge(fila['Linea_A'], fila['Linea_B'], label=str(cant), 
+                         width=max(1, cant/2), color="#444444")
         
-        # Configuración Jerárquica Izquierda a Derecha (LR)
-        net.set_options("""
-        var options = {
-          "layout": {
-            "hierarchical": {
-              "enabled": true,
-              "levelSeparation": 350,
-              "nodeSpacing": 150,
-              "treeSpacing": 200,
-              "blockShifting": true,
-              "edgeMinimization": true,
-              "parentCentralization": true,
-              "direction": "LR",
-              "sortMethod": "directed"
-            }
-          },
-          "physics": {"enabled": false},
-          "interaction": {"navigationButtons": true, "hover": true}
-        }
-        """)
+        net.set_options("""{"layout": {"hierarchical": {"enabled": true, "direction": "LR", "sortMethod": "directed"}}, "physics": {"enabled": false}}""")
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
@@ -252,8 +227,8 @@ if 'main_df' in st.session_state:
         col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
         n_buscar = col_f1.text_input("Número a rastrear:")
         if n_buscar:
-            f_ini = col_f2.date_input("Inicio:", df['Fecha'].min())
-            f_fin = col_f3.date_input("Fin:", df['Fecha'].max())
+            f_ini = col_f2.date_input("Inicio:", df['Fecha'].min().date())
+            f_fin = col_f3.date_input("Fin:", df['Fecha'].max().date())
             res = df[(df['Linea_A'] == n_buscar) | (df['Linea_B'] == n_buscar)]
             res = res[(res['Fecha'].dt.date >= f_ini) & (res['Fecha'].dt.date <= f_fin)]
             st.dataframe(res.sort_values('Fecha'), use_container_width=True)
@@ -266,8 +241,10 @@ if 'main_df' in st.session_state:
             with f_cols[i % 3]:
                 with st.expander(f"👤 FICHA: {num}"):
                     f_up = st.file_uploader("Foto:", type=['jpg','png','jpeg'], key=f"f_{num}")
-                    if f_up: st.session_state.fotos_sujetos[num] = f_up
-                    if num in st.session_state.fotos_sujetos: st.image(st.session_state.fotos_sujetos[num], width=120)
+                    if f_up:
+                        st.session_state.fotos_sujetos[num] = f_up.getvalue()
+                    if num in st.session_state.fotos_sujetos:
+                        st.image(st.session_state.fotos_sujetos[num], width=120)
                     st.session_state.bitacora[num] = st.text_area("Notas:", value=st.session_state.bitacora.get(num, ""), key=f"n_{num}")
 
         if st.button("📄 Generar Reporte PDF Final"):
@@ -279,10 +256,13 @@ if 'main_df' in st.session_state:
                 pdf.set_font("Helvetica", "B", 16)
                 pdf.cell(0, 15, f"EXPEDIENTE: {num}", ln=True, align="C", fill=True)
                 pdf.set_text_color(0, 0, 0); pdf.ln(10)
+                
                 if num in st.session_state.fotos_sujetos:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t:
-                        Image.open(st.session_state.fotos_sujetos[num]).convert("RGB").save(t.name)
+                        img = Image.open(BytesIO(st.session_state.fotos_sujetos[num])).convert("RGB")
+                        img.save(t.name)
                         pdf.image(t.name, x=10, y=35, w=40)
+                
                 pdf.set_x(55); pdf.set_font("Helvetica", "B", 12)
                 pdf.cell(0, 10, f"ID: {num}", ln=True)
                 pdf.set_font("Helvetica", "", 11); pdf.set_x(55)
@@ -290,7 +270,10 @@ if 'main_df' in st.session_state:
                 pdf.ln(30); pdf.set_fill_color(240, 240, 240)
                 pdf.cell(0, 10, "OBSERVACIONES TÁCTICAS:", ln=True, fill=True)
                 pdf.multi_cell(0, 8, st.session_state.bitacora.get(num, "Sin datos registrados."), border=1)
-            pdf_b = pdf.output()
-            st.download_button("📥 Descargar Reporte", data=bytes(pdf_b), file_name="Reporte_Intel.pdf")
+            
+            # --- CORRECCIÓN DEL TYPEERROR ---
+            pdf_out = pdf.output(dest='S')
+            pdf_bytes = pdf_out.encode('latin-1') if isinstance(pdf_out, str) else pdf_out
+            st.download_button("📥 Descargar Reporte", data=pdf_bytes, file_name="Reporte_Intel.pdf", mime="application/pdf")
 else:
     st.info("SISTEMA EN ESPERA: Cargue el vector de datos (Excel) o abra un caso guardado en la barra lateral.")
